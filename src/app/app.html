@@ -1,30 +1,27 @@
-<div style="padding: 16px; font-family: system-ui, sans-serif;">
-  <h3>Excel Add-in POC</h3>
+<div style="padding: 15px; font-family: sans-serif;">
+  <h3>Excel Database Manager</h3>
 
-  @if (!isLoggedIn()) {
-    <div>
-      <button (click)="onLogin()">Login</button>
-    </div>
-  } @else {
-    <div>
-      <button (click)="loadExcelSheet()" [disabled]="loading()">
-        Fetch & Inject 600k Rows
-      </button>
-    </div>
-  }
+  <div style="margin-bottom: 10px;">
+    <label>Entity/Table Name:</label><br />
+    <input type="text" [(ngModel)]="entityName" placeholder="e.g. product" />
+  </div>
 
-  <p><strong>Status:</strong> {{ statusMessage() }}</p>
+  <div style="margin-bottom: 10px;">
+    <label>WHERE Clause (Optional):</label><br />
+    <input type="text" [(ngModel)]="whereClause" placeholder="e.g. status = 'ACTIVE'" />
+  </div>
 
-  @if (timings(); as t) {
-    <div style="margin-top: 12px; background: #f4f4f4; padding: 10px; border-radius: 4px;">
-      <h4>📊 Performance Split</h4>
-      <ul>
-        <li><strong>Java API & Network:</strong> {{ t.javaNetworkMs }} ms</li>
-        <li><strong>Raw XML Import:</strong> {{ t.rawImportMs }} ms</li>
-        <li><strong>Sheet Rename:</strong> {{ t.renameSheetMs }} ms</li>
-        <li><strong>Formula Evaluation:</strong> {{ t.formulaEvaluationMs }} ms</li>
-        <li><strong>Total Execution Time:</strong> {{ t.totalMs }} ms</li>
-      </ul>
-    </div>
-  }
+  <div style="margin-bottom: 10px;">
+    <label>Custom Function/Transformer Bean (Optional):</label><br />
+    <input type="text" [(ngModel)]="transformerBean" placeholder="Leave blank if none (e.g. productTransformer)" />
+  </div>
+
+  <div style="margin-top: 15px;">
+    <button (click)="onDownload()" [disabled]="loading()">Download to Excel</button>
+    <button (click)="onUpload()" [disabled]="loading()" style="margin-left: 10px;">Upload Changes</button>
+  </div>
+
+  <div style="margin-top: 15px; font-weight: bold; color: #333;">
+    <p>Status: {{ statusMessage() }}</p>
+  </div>
 </div>

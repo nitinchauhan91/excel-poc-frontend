@@ -2,90 +2,122 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { lastValueFrom } from 'rxjs';
 
-declare const Office: any;
 declare const Excel: any;
 
-export interface TimingMetrics {
-  javaNetworkMs: number;
-  rawImportMs: number;
-  renameSheetMs: number;
-  formulaEvaluationMs: number;
-  totalMs: number;
-}
-
-export interface BackendExcelResponse {
-  base64: string;
-  sourceSheetName: string;
-}
-
-@Injectable({
-  providedIn: 'root'
-})
+@Injectable({ providedIn: 'root' })
 export class ExcelBridgeService {
   private http = inject(HttpClient);
+  private apiBase = 'http://localhost:8080/api/generic';
 
-  public async fetchAndInject(
-    apiEndpoint: string,
-    requestPayload: any,
-    targetSheetName: string
-  ): Promise<TimingMetrics> {
-    const t0 = performance.now();
+  /**
+   * DOWNLOAD & INJECT
+   * Deletes existing sheet if present, injects fresh sheet, attaches onChanged listener for live highlighting.
+   */
+  async downloadAndInject(
+    entityName: string, 
+    whereClause: string = '', 
+    transformerBean: string = ''
+  ) {
+    const payload = { 
+      entityName, 
+      whereClause, 
+      customTransformerBean: transformerBean.trim()
+    };
 
-    const response = await lastValueFrom(
-      this.http.post<BackendExcelResponse>(apiEndpoint, requestPayload)
-    );
-
-    const t1 = performance.now();
-
-    if (!response || !response.base64 || !response.sourceSheetName) {
-      throw new Error('Invalid backend response structure.');
-    }
-
-    let t2 = 0;
-    let t3 = 0;
-    let t4 = 0;
+    const res = await lastValueFrom(this.http.post<any>(`${this.apiBase}/download`, payload));
 
     await Excel.run(async (context: any) => {
       const workbook = context.workbook;
 
-      context.application.calculationMode = Excel.CalculationMode.manual;
-      context.application.suspendScreenUpdatingUntilNextSync();
-
-      const insertedSheetIds = workbook.insertWorksheetsFromBase64(
-        response.base64,
-        {
-          sheetNamesToInsert: [response.sourceSheetName],
-          positionType: Excel.WorksheetPositionType.end
-        }
-      );
-
+      // 1. CLEANUP: Delete old sheet if it already exists
+      const existingSheet = workbook.worksheets.getItemOrNullObject(entityName);
       await context.sync();
-      t2 = performance.now();
-
-      const sheetIds = insertedSheetIds.value;
-      if (!sheetIds || !Array.isArray(sheetIds) || sheetIds.length === 0) {
-        throw new Error('No worksheet ID returned after Base64 injection.');
+      if (!existingSheet.isNullObject) {
+        existingSheet.delete();
+        await context.sync();
       }
 
-      const insertedSheet = workbook.worksheets.getItem(sheetIds[0]);
-      insertedSheet.name = targetSheetName;
+      // 2. INJECT: Add new sheet from Base64 binary
+      const insertedSheets = workbook.insertWorksheetsFromBase64(res.base64, {
+        sheetNamesToInsert: [res.sourceSheetName],
+        positionType: Excel.WorksheetPositionType.end
+      });
+      await context.sync();
+
+      const sheet = workbook.worksheets.getItem(insertedSheets.value[0]);
+      sheet.name = entityName;
+
+      // 3. TABLE FORMATTING
+      const usedRange = sheet.getUsedRange();
+      const table = sheet.tables.add(usedRange, true);
+      table.name = `Table_${entityName}`;
+      usedRange.format.autofitColumns();
+
+      // 4. LIVE EVENT LISTENER: Highlight edited cells/inserted rows in yellow
+      sheet.onChanged.add(async (event: any) => {
+        if (event.changeType === 'RangeEdited' || event.changeType === 'RowInserted') {
+          await Excel.run(async (ctx: any) => {
+            const currentSheet = ctx.workbook.worksheets.getItem(entityName);
+            const editedRange = currentSheet.getRange(event.address);
+            editedRange.format.fill.color = '#FFF2CC'; // Soft yellow highlight
+            await ctx.sync();
+          });
+        }
+      });
 
       await context.sync();
-      t3 = performance.now();
+    });
+  }
 
-      context.application.calculationMode = Excel.CalculationMode.automatic;
-      context.application.calculate(Excel.CalculationType.full);
+  /**
+   * UPLOAD MODIFIED ROWS
+   * Reads grid, sends updates to Spring Boot, and re-downloads fresh sheet (clearing yellow highlights).
+   */
+  async uploadModifiedRows(entityName: string, transformerBean: string = '') {
+    let modifiedRows: any[] = [];
 
+    await Excel.run(async (context: any) => {
+      const sheet = context.workbook.worksheets.getItem(entityName);
+      const usedRange = sheet.getUsedRange(true);
+      usedRange.load(['values']);
       await context.sync();
-      t4 = performance.now();
+
+      const data: any[][] = usedRange.values;
+      if (!data || data.length <= 1) return;
+
+      const headers: string[] = data[0].map((h: any) =>
+        h ? String(h).trim().toLowerCase() : ''
+      );
+
+      for (let i = 1; i < data.length; i++) {
+        const rowData: Record<string, any> = {};
+        let hasContent = false;
+
+        headers.forEach((header, colIdx) => {
+          if (header) {
+            const val = data[i][colIdx];
+            if (val !== null && val !== undefined && val !== '') {
+              rowData[header] = val;
+              hasContent = true;
+            } else {
+              rowData[header] = null;
+            }
+          }
+        });
+
+        if (hasContent) {
+          modifiedRows.push(rowData);
+        }
+      }
     });
 
-    return {
-      javaNetworkMs: Math.round(t1 - t0),
-      rawImportMs: Math.round(t2 - t1),
-      renameSheetMs: Math.round(t3 - t2),
-      formulaEvaluationMs: Math.round(t4 - t3),
-      totalMs: Math.round(t4 - t0)
-    };
+    if (modifiedRows.length === 0) return;
+
+    // Send updates to Java
+    const uploadUrl = `${this.apiBase}/upload?entityName=${encodeURIComponent(entityName)}`;
+    await lastValueFrom(this.http.post<any>(uploadUrl, modifiedRows));
+
+    // Refresh sheet: Deletes old highlighted sheet and injects fresh clean data from Java
+    await this.downloadAndInject(entityName, '', transformerBean);
   }
 }
