@@ -1,0 +1,30 @@
+<div style="padding: 16px; font-family: system-ui, sans-serif;">
+  <h3>Excel Add-in POC</h3>
+
+  @if (!isLoggedIn()) {
+    <div>
+      <button (click)="onLogin()">Login</button>
+    </div>
+  } @else {
+    <div>
+      <button (click)="loadExcelSheet()" [disabled]="loading()">
+        Fetch & Inject 600k Rows
+      </button>
+    </div>
+  }
+
+  <p><strong>Status:</strong> {{ statusMessage() }}</p>
+
+  @if (timings(); as t) {
+    <div style="margin-top: 12px; background: #f4f4f4; padding: 10px; border-radius: 4px;">
+      <h4>📊 Performance Split</h4>
+      <ul>
+        <li><strong>Java API & Network:</strong> {{ t.javaNetworkMs }} ms</li>
+        <li><strong>Raw XML Import:</strong> {{ t.rawImportMs }} ms</li>
+        <li><strong>Sheet Rename:</strong> {{ t.renameSheetMs }} ms</li>
+        <li><strong>Formula Evaluation:</strong> {{ t.formulaEvaluationMs }} ms</li>
+        <li><strong>Total Execution Time:</strong> {{ t.totalMs }} ms</li>
+      </ul>
+    </div>
+  }
+</div>

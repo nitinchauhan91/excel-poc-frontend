@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+
+<OfficeApp
+xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+xsi:type="TaskPaneApp">
+
+<Id>c38f3214-934a-4e12-b5e1-0123456789ab</Id> <Version>1.0.0.0</Version> <ProviderName>POC Developer</ProviderName> <DefaultLocale>en-US</DefaultLocale>
+
+  <DisplayName DefaultValue="Backend Excel POC"/>
+
+  <Description DefaultValue="POC for backend-driven Excel sheet generation"/>
+
+  <IconUrl DefaultValue="https://localhost:4200/icon-32.png"/>
+
+<HighResolutionIconUrl
+ DefaultValue="https://localhost:4200/icon-80.png"/>
+
+  <SupportUrl DefaultValue="https://localhost:4200/"/>
+
+  <AppDomains>
+    <AppDomain>https://localhost:4200</AppDomain>
+  </AppDomains>
+
+  <Hosts>
+    <Host Name="Workbook"/>
+  </Hosts>
+
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://localhost:4200/"/>
+  </DefaultSettings>
+
+<Permissions>ReadWriteDocument</Permissions>
+
+</OfficeApp>
