@@ -11,13 +11,13 @@ export class ExcelBridgeService {
 
   /**
    * DOWNLOAD & INJECT
-   * Deletes existing sheet if present, injects fresh sheet, attaches onChanged listener for live highlighting.
+   * Fetches Base64 payload from Spring Boot and injects sheet into host workbook natively
    */
-  async downloadAndInject(
+  public async downloadAndInject(
     entityName: string, 
     whereClause: string = '', 
     transformerBean: string = ''
-  ) {
+  ): Promise<void> {
     const payload = { 
       entityName, 
       whereClause, 
@@ -29,7 +29,7 @@ export class ExcelBridgeService {
     await Excel.run(async (context: any) => {
       const workbook = context.workbook;
 
-      // 1. CLEANUP: Delete old sheet if it already exists
+      // 1. Delete existing worksheet if already loaded to avoid duplicate key errors
       const existingSheet = workbook.worksheets.getItemOrNullObject(entityName);
       await context.sync();
       if (!existingSheet.isNullObject) {
@@ -37,29 +37,30 @@ export class ExcelBridgeService {
         await context.sync();
       }
 
-      // 2. INJECT: Add new sheet from Base64 binary
+      // 2. Native C++ Base64 Insertion
       const insertedSheets = workbook.insertWorksheetsFromBase64(res.base64, {
         sheetNamesToInsert: [res.sourceSheetName],
         positionType: Excel.WorksheetPositionType.end
       });
       await context.sync();
 
+      // Get exact sheet reference via item index
       const sheet = workbook.worksheets.getItem(insertedSheets.value[0]);
       sheet.name = entityName;
 
-      // 3. TABLE FORMATTING
+      // 3. Format dataset into a structured Excel Table
       const usedRange = sheet.getUsedRange();
       const table = sheet.tables.add(usedRange, true);
       table.name = `Table_${entityName}`;
       usedRange.format.autofitColumns();
 
-      // 4. LIVE EVENT LISTENER: Highlight edited cells/inserted rows in yellow
+      // 4. Register live change listener for cell highlighting
       sheet.onChanged.add(async (event: any) => {
         if (event.changeType === 'RangeEdited' || event.changeType === 'RowInserted') {
           await Excel.run(async (ctx: any) => {
             const currentSheet = ctx.workbook.worksheets.getItem(entityName);
             const editedRange = currentSheet.getRange(event.address);
-            editedRange.format.fill.color = '#FFF2CC'; // Soft yellow highlight
+            editedRange.format.fill.color = '#FFF2CC'; // Highlight edits yellow
             await ctx.sync();
           });
         }
@@ -70,54 +71,112 @@ export class ExcelBridgeService {
   }
 
   /**
-   * UPLOAD MODIFIED ROWS
-   * Reads grid, sends updates to Spring Boot, and re-downloads fresh sheet (clearing yellow highlights).
+   * UPLOAD MODIFIED ROWS (STANDARD BATCH FOR SMALL DATASETS ONLY)
    */
-  async uploadModifiedRows(entityName: string, transformerBean: string = '') {
-    let modifiedRows: any[] = [];
+  public async uploadModifiedRows(entityName: string, transformerBean: string = ''): Promise<void> {
+    // For 600k datasets, route directly to the chunked streaming method
+    return this.streamUploadAndTransform(entityName, transformerBean, 5000);
+  }
 
+  /**
+   * STREAMING UPLOAD (OPTIMIZED FOR 600K BENCHMARK)
+   * Streams micro-batches with matrix-range updates and live UI progress color tracking
+   */
+  public async streamUploadAndTransform(
+    entityName: string, 
+    transformerBean: string = '', 
+    chunkSize: number = 5000 // 5,000 row chunks optimal for high volume
+  ): Promise<void> {
+    
+    let totalRows = 0;
+    let headers: string[] = [];
+
+    // Step 1: Lightweight inspection to fetch total rows and headers
     await Excel.run(async (context: any) => {
       const sheet = context.workbook.worksheets.getItem(entityName);
       const usedRange = sheet.getUsedRange(true);
-      usedRange.load(['values']);
+      usedRange.load(['rowCount', 'columnCount']);
+      
+      const headerRange = sheet.getRange("1:1").getUsedRange();
+      headerRange.load('values');
+      
       await context.sync();
 
-      const data: any[][] = usedRange.values;
-      if (!data || data.length <= 1) return;
-
-      const headers: string[] = data[0].map((h: any) =>
-        h ? String(h).trim().toLowerCase() : ''
-      );
-
-      for (let i = 1; i < data.length; i++) {
-        const rowData: Record<string, any> = {};
-        let hasContent = false;
-
-        headers.forEach((header, colIdx) => {
-          if (header) {
-            const val = data[i][colIdx];
-            if (val !== null && val !== undefined && val !== '') {
-              rowData[header] = val;
-              hasContent = true;
-            } else {
-              rowData[header] = null;
-            }
-          }
-        });
-
-        if (hasContent) {
-          modifiedRows.push(rowData);
-        }
+      totalRows = usedRange.rowCount;
+      if (headerRange.values && headerRange.values[0]) {
+        headers = headerRange.values[0].map((h: any) => h ? String(h).trim().toLowerCase() : '');
       }
     });
 
-    if (modifiedRows.length === 0) return;
+    if (totalRows <= 1 || headers.length === 0) return;
 
-    // Send updates to Java
-    const uploadUrl = `${this.apiBase}/upload?entityName=${encodeURIComponent(entityName)}`;
-    await lastValueFrom(this.http.post<any>(uploadUrl, modifiedRows));
+    const totalPriceColIdx = headers.indexOf('total_price');
+    const uploadUrl = `${this.apiBase}/upload-stream?entityName=${encodeURIComponent(entityName)}&transformerBean=${encodeURIComponent(transformerBean)}`;
 
-    // Refresh sheet: Deletes old highlighted sheet and injects fresh clean data from Java
-    await this.downloadAndInject(entityName, '', transformerBean);
+    // Step 2: Read, Upload, and Highlight in 5,000-row CHUNKS
+    for (let startRow = 1; startRow < totalRows; startRow += chunkSize) {
+      const currentChunkSize = Math.min(chunkSize, totalRows - startRow);
+      let batchRows: any[] = [];
+
+      // A. Load ONLY current 5,000-row range into JS memory & Highlight Yellow
+      await Excel.run(async (context: any) => {
+        const sheet = context.workbook.worksheets.getItem(entityName);
+        
+        // Target row index window: startRow to startRow + currentChunkSize
+        const chunkRange = sheet.getRangeByIndexes(startRow, 0, currentChunkSize, headers.length);
+        chunkRange.load('values');
+        
+        // Visual indicator: Active processing chunk turns yellow
+        chunkRange.format.fill.color = '#FFF2CC'; 
+        
+        await context.sync();
+
+        // Convert batch range array to JSON payload
+        for (let r = 0; r < chunkRange.values.length; r++) {
+          const rowValues = chunkRange.values[r];
+          const rowData: Record<string, any> = {};
+          let hasData = false;
+
+          headers.forEach((header, colIdx) => {
+            if (header) {
+              const val = rowValues[colIdx];
+              if (val !== null && val !== undefined && val !== '') {
+                rowData[header] = val;
+                hasData = true;
+              }
+            }
+          });
+
+          if (hasData) {
+            batchRows.push(rowData);
+          }
+        }
+      });
+
+      if (batchRows.length === 0) continue;
+
+      // B. Send micro-batch to Spring Boot
+      const processedBatch = await lastValueFrom(
+        this.http.post<any[]>(uploadUrl, batchRows)
+      );
+
+      // C. Update backend computations (total_price) and turn batch Green
+      await Excel.run(async (context: any) => {
+        const sheet = context.workbook.worksheets.getItem(entityName);
+        const chunkRange = sheet.getRangeByIndexes(startRow, 0, currentChunkSize, headers.length);
+
+        // Matrix update calculated total_price
+        if (totalPriceColIdx !== -1 && processedBatch && processedBatch.length > 0) {
+          const updateMatrix = processedBatch.map(row => [row['total_price'] ?? null]);
+          const targetColumnRange = sheet.getRangeByIndexes(startRow, totalPriceColIdx, currentChunkSize, 1);
+          targetColumnRange.values = updateMatrix;
+        }
+
+        // Visual indicator: Completed chunk turns green
+        chunkRange.format.fill.color = '#D9EAD3';
+        
+        await context.sync();
+      });
+    }
   }
 }
